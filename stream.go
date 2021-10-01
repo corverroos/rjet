@@ -7,9 +7,12 @@ import (
 	"time"
 
 	"github.com/luno/jettison/errors"
+	"github.com/luno/jettison/j"
 	"github.com/luno/reflex"
 	"github.com/nats-io/nats.go"
 )
+
+var ErrDroppedMsg = errors.New("rjet: message dropped")
 
 // NewStream returns a reflex stream capable of streaming (reading) from the provided jetstream.
 // Use WithDefaultStream to automatically configure a suitable stream.
@@ -66,11 +69,18 @@ func (s *Stream) Stream(ctx context.Context, after string,
 	subopts := []nats.SubOpt{
 		nats.BindStream(s.name),
 		nats.ReplayInstant(),
+		nats.OrderedConsumer(),
 	}
 
 	if sopts.Lag > 0 {
 		return nil, errors.New("lag option not supported")
-	} else if sopts.StreamFromHead {
+	} else if sopts.StreamToHead {
+		return nil, errors.New("stream to head option not supported")
+	}
+
+	var expect uint64
+
+	if sopts.StreamFromHead {
 		subopts = append(subopts, nats.DeliverNew())
 	} else if after == "" {
 		subopts = append(subopts, nats.DeliverAll())
@@ -79,7 +89,8 @@ func (s *Stream) Stream(ctx context.Context, after string,
 		if err != nil {
 			return nil, errors.Wrap(err, "failed parsing redis stream entry id: "+after)
 		}
-		subopts = append(subopts, nats.StartSequence(seq+1))
+		expect = seq + 1
+		subopts = append(subopts, nats.StartSequence(expect))
 	}
 
 	// Since reflex manages its own cursors, we create an ephemeral consumers
@@ -88,50 +99,73 @@ func (s *Stream) Stream(ctx context.Context, after string,
 		return nil, err
 	}
 
-	return streamclient{
-		ctx:    ctx,
-		toHead: sopts.StreamToHead,
-		sub:    sub,
+	return &streamclient{
+		ctx: ctx,
+		sub: sub,
 	}, nil
 }
 
 type streamclient struct {
 	ctx    context.Context
 	sub    *nats.Subscription
-	toHead bool
+	expect uint64
 }
 
-func (s streamclient) Recv() (*reflex.Event, error) {
+func (s *streamclient) Recv() (*reflex.Event, error) {
+start:
 	msg, err := s.sub.NextMsgWithContext(s.ctx)
-	if err != nil {
+	if errors.Is(err, nats.ErrSlowConsumer) {
+		return nil, errors.Wrap(ErrDroppedMsg, err.Error())
+	} else if err != nil {
 		return nil, errors.Wrap(err, "jetstream next")
 	}
 
-	return parseEvent(msg)
+	e, id, err := parseEvent(msg)
+	if err != nil {
+		return nil, err
+	}
+
+	if s.expect != 0 && s.expect < id {
+		return nil, errors.Wrap(ErrDroppedMsg, "got unexpected seq", j.MKV{"got": id, "expect": s.expect})
+	} else if s.expect != 0 && s.expect > id {
+		// Duplicate message... lets swallow it
+		goto start
+	}
+
+	s.expect = id + 1
+
+	// TODO(corver): Is this still required given the above check?
+	if d, err := s.sub.Dropped(); err != nil {
+		return nil, err
+	} else if d > 0 {
+		return nil, errors.Wrap(ErrDroppedMsg, "subscription dropped", j.MKV{"got": id, "expect": s.expect})
+	}
+
+	return e, nil
 }
 
 // parseEvent parses a reflex event from a jetstream msg.
 // Get metadata from reply subject: $JS.ACK.<stream>.<consumer>.<delivered count>.<stream sequence>.<consumer sequence>.<timestamp>.<pending messages>
 // See for reference: https://docs.nats.io/jetstream/nats_api_reference#acknowledging-messages
 // Also see: https://github.com/jgaskins/nats/blob/3ebac6a59ab1d0482c1ef5c42ee3c7e4f7fa7d58/src/jetstream.cr#L187-L206
-func parseEvent(msg *nats.Msg) (*reflex.Event, error) {
+func parseEvent(msg *nats.Msg) (*reflex.Event, uint64, error) {
 	split := strings.Split(msg.Reply, ".")
 	if len(split) != 9 {
-		return nil, errors.New("failed parsing msg metadata")
+		return nil, 0, errors.New("failed parsing msg metadata")
 	}
 
 	stream := split[2]
 	seq := split[5]
 	timestamp := split[7]
 
-	_, err := strconv.ParseInt(seq, 10, 64)
+	id, err := strconv.ParseUint(seq, 10, 64)
 	if err != nil {
-		return nil, errors.Wrap(err, "failed parsing msg seq")
+		return nil, 0, errors.Wrap(err, "failed parsing msg seq")
 	}
 
 	ts, err := strconv.ParseInt(timestamp, 10, 64)
 	if err != nil {
-		return nil, errors.Wrap(err, "failed parsing msg timestamp")
+		return nil, 0, errors.Wrap(err, "failed parsing msg timestamp")
 	}
 
 	return &reflex.Event{
@@ -139,5 +173,5 @@ func parseEvent(msg *nats.Msg) (*reflex.Event, error) {
 		ForeignID: stream,
 		Timestamp: time.Unix(0, ts),
 		MetaData:  msg.Data,
-	}, nil
+	}, id, nil
 }

@@ -4,7 +4,6 @@ import (
 	"testing"
 
 	"github.com/corverroos/rjet"
-
 	"github.com/matryer/is"
 )
 
@@ -14,8 +13,7 @@ const (
 )
 
 func TestBasicCursor(t *testing.T) {
-	ctx, js, ii := setup(t)
-
+	ctx, js, ii, _ := setup(t)
 	store := rjet.NewCursorStore(js, ns)
 
 	get := func(ii *is.I, expected string) {

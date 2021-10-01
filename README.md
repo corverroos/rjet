@@ -1,9 +1,11 @@
 # rjet
 
-A [reflex](https://github.com/luno/reflex) stream client for a [NATS Jetstream](https://docs.nats.io/jetstream/jetstream).
+A [reflex](https://github.com/luno/reflex) stream client for a [NATS JetStream](https://docs.nats.io/jetstream/jetstream).
 
-It provides an API for consuming data from a nats jetstream stream with at-least-once semantics.
-It also provides a reflex.CursorStore implementation for storing cursors in a nats jetstream (probably not a good idea).
+It provides an API for consuming data from a NATS JS stream with at-least-once delivery semantics. Since reflex does its
+own cursor management, it uses ordered ephemeral consumers. 
+
+It also provides a reflex.CursorStore implementation for storing cursors in a NATS JS stream (probably not a good idea).
 
 ### Usage
 
@@ -49,5 +51,9 @@ for {
 
 ## Notes
 
-- Since reflex events have specific fields (type, foreignID, timestamp, data) the redis stream entries need to adhere to a specific format. It is therefore advised to use Stream.Insert to ensure the correct format.
-- At-least-once semantics are also provided by redis consumer groups, but it doesn't provide strict ordering. rredis maintains strict ordering and can provide sharding using reflex/rpatterns.Parralel.
+- NATS JS ephemeral consumers are push based and therefore inherently "best-effort". `rjet` handles this by detecting 
+dropped messages and return ErrDroppedMsg. The application code should just retry from the previous cursor.
+  - Slow consumers drop messages, since messages are queued in a channel inside the NATS client. 
+  - Dropped connections may result in dropped message even though the nats client auto-reconnects. It is suggested to use a very short nats.ReconnectWait. 
+
+> Note: ErrDroppedMsg is expected in some edge cases, application code should just restart streaming from the previous cursor (default reflex behaviour). 

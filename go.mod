@@ -9,5 +9,6 @@ require (
 	github.com/matryer/is v1.4.0
 	github.com/nats-io/nats-server/v2 v2.6.1 // indirect
 	github.com/nats-io/nats.go v1.12.3
+	golang.org/x/sync v0.0.0-20190423024810-112230192c58
 	google.golang.org/protobuf v1.27.1 // indirect
 )

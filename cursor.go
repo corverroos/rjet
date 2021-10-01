@@ -61,8 +61,9 @@ func (c *CursorStore) ensureStream(name string) error {
 func (c *CursorStore) GetCursor(ctx context.Context, cursor string) (string, error) {
 	name := c.name(cursor)
 
-	if err := c.ensureStream(name); err != nil {
-		return "", err
+	if _, err := c.js.StreamInfo(name); errors.Is(err, nats.ErrStreamNotFound) {
+		// No stream, so no cursor.
+		return "", nil
 	}
 
 	subopts := []nats.SubOpt{
@@ -77,20 +78,8 @@ func (c *CursorStore) GetCursor(ctx context.Context, cursor string) (string, err
 		return "", errors.Wrap(err, "ensure")
 	}
 
-	// No need to wait long messages.
-	ctx, cancel := context.WithTimeout(ctx, time.Millisecond*500)
-	defer cancel()
-
 	msg, err := sub.NextMsgWithContext(ctx)
-	if errors.Is(err, context.DeadlineExceeded) {
-		info, err2 := sub.ConsumerInfo()
-		if err2 != nil {
-			return "", err2
-		} else if info.NumWaiting == 0 || info.NumPending == 0 {
-			// Stream is empty...?
-			return "", nil
-		}
-	} else if err != nil {
+	if err != nil {
 		return "", err
 	}
 
