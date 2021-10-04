@@ -266,7 +266,6 @@ func TestSlowConsumer(t *testing.T) {
 			}
 		}
 	}
-
 }
 
 func TestBrokenConns(t *testing.T) {
@@ -363,6 +362,45 @@ func TestBrokenConns(t *testing.T) {
 		}
 		prev = e
 	}
+}
+
+func TestSubjectFilter(t *testing.T) {
+	ctx, js, ii, _ := setup(t)
+
+	const total = 10
+
+	// Ensure stream is created
+	_, err := rjet.NewStream(js, stream, rjet.WithDefaultStream(insubs))
+	ii.NoErr(err)
+
+	// Insert 10 to each subscription.
+	for i := 0; i < total; i++ {
+		_, err := js.Publish(insub1, []byte(fmt.Sprint(i)))
+		ii.NoErr(err)
+
+		_, err = js.Publish(insub2, []byte(fmt.Sprint(i*2)))
+		ii.NoErr(err)
+	}
+
+	assert := func(ii *is.I, subj string, multi int) {
+		ii.Helper()
+
+		s, err := rjet.NewStream(js, stream, rjet.WithSubjectFilter(subj))
+		jtest.RequireNil(t, err)
+
+		sc, err := s.Stream(ctx, "")
+		jtest.RequireNil(t, err)
+
+		for i := 0; i < total; i++ {
+			e, err := sc.Recv()
+			jtest.RequireNil(t, err, i)
+
+			ii.Equal(e.MetaData, []byte(fmt.Sprint(i*multi)))
+		}
+	}
+
+	assert(ii, insub1, 1)
+	assert(ii, insub2, 2)
 }
 
 func startProxy(t *testing.T, ctx context.Context, target string) (*proxy, string) {
