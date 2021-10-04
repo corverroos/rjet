@@ -119,6 +119,10 @@ type streamclient struct {
 	first  bool
 }
 
+func (s *streamclient) Close() error {
+	return s.sub.Unsubscribe()
+}
+
 func (s *streamclient) Recv() (*reflex.Event, error) {
 start:
 	msg, err := s.sub.NextMsgWithContext(s.ctx)
@@ -147,7 +151,7 @@ start:
 
 	s.expect = cseq + 1
 
-	// TODO(corver): Is this still required given the above check?
+	// TODO(corver): Is this still required given the above checks?
 	if d, err := s.sub.Dropped(); err != nil {
 		return nil, err
 	} else if d > 0 {

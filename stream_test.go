@@ -30,6 +30,10 @@ const (
 	insubs = "input-subjet.*"
 )
 
+var (
+	subqlen = 100
+)
+
 func randStr() string {
 	b := make([]byte, 16)
 	if _, err := rand.Read(b); err != nil {
@@ -38,7 +42,7 @@ func randStr() string {
 	return hex.EncodeToString(b)
 }
 
-func setup(t *testing.T) (context.Context, nats.JetStreamContext, *is.I, *proxy) {
+func setup(t testing.TB) (context.Context, nats.JetStreamContext, *is.I, *proxy) {
 	rand.Seed(time.Now().UnixNano())
 	is := is.New(t)
 
@@ -49,7 +53,8 @@ func setup(t *testing.T) (context.Context, nats.JetStreamContext, *is.I, *proxy)
 	c, err := nats.Connect("nats://"+purl,
 		nats.ReconnectWait(time.Millisecond), // Fast reconnects
 		nats.RetryOnFailedConnect(true),
-		nats.SyncQueueLen(100)) // Use a small queue
+		nats.SyncQueueLen(subqlen), // Use a small queue
+	)
 	is.NoErr(err)
 
 	t0 := time.Now()
@@ -118,6 +123,7 @@ func TestBasicStream(t *testing.T) {
 	wg.Add(1)
 	go func() {
 		assertRand(ii, sc1, 1, 8)
+		ii.NoErr(sc1.(io.Closer).Close())
 		wg.Done()
 	}()
 
@@ -131,16 +137,19 @@ func TestBasicStream(t *testing.T) {
 	insertRand(ii, 7, 8)
 	assertRand(ii, sc2, 6, 7)
 	assertRand(ii, sc2, 8, 8)
+	ii.NoErr(sc2.(io.Closer).Close())
 
 	// Third consumer, streams everything in the past.
 	sc3, err := s.Stream(ctx, "")
 	jtest.RequireNil(t, err)
 	assertRand(ii, sc3, 1, 8)
+	ii.NoErr(sc3.(io.Closer).Close())
 
 	// forth consumer, streams everything from a point the past.
 	sc4, err := s.Stream(ctx, "3")
 	jtest.RequireNil(t, err)
 	assertRand(ii, sc4, 4, 8)
+	ii.NoErr(sc4.(io.Closer).Close())
 
 	wg.Wait()
 }
@@ -403,7 +412,48 @@ func TestSubjectFilter(t *testing.T) {
 	assert(ii, insub2, 2)
 }
 
-func startProxy(t *testing.T, ctx context.Context, target string) (*proxy, string) {
+func TestBench01(t *testing.T) {
+	subqlen = 0
+	ctx, js, ii, _ := setup(t)
+
+	const (
+		total   = 10000
+		payload = 64
+	)
+
+	b := make([]byte, payload)
+	_, err := rand.Read(b)
+	ii.NoErr(err)
+
+	s, err := rjet.NewStream(js, stream, rjet.WithDefaultStream(insub1))
+	ii.NoErr(err)
+
+	t0 := time.Now()
+
+	go func() {
+		for i := 0; i < total; i++ {
+			_, err := js.PublishAsync(insub1, b)
+			ii.NoErr(err)
+		}
+		<-js.PublishAsyncComplete()
+		delta := time.Since(t0)
+		fmt.Printf("Publish done after %s, %.1f msgs/sec\n", delta, total/delta.Seconds())
+	}()
+
+	sc, err := s.Stream(ctx, "")
+	ii.NoErr(err)
+
+	for i := 0; i < total; i++ {
+		_, err := sc.Recv()
+		ii.NoErr(err)
+	}
+
+	delta := time.Since(t0)
+
+	fmt.Printf("Duration=%dms, Total=%d, Payload=%d bytes, Throughput=%.0f msgs/sec\n", delta.Milliseconds(), total, payload, total/delta.Seconds())
+}
+
+func startProxy(t testing.TB, ctx context.Context, target string) (*proxy, string) {
 	l, err := (&net.ListenConfig{}).Listen(ctx, "tcp", "localhost:0")
 	if err != nil {
 		t.Error(err)
@@ -460,7 +510,7 @@ func (p *proxy) BreakAll() (int, error) {
 	return l, nil
 }
 
-func (p *proxy) handle(t *testing.T, in, out net.Conn) {
+func (p *proxy) handle(t testing.TB, in, out net.Conn) {
 	p.mu.Lock()
 	p.conns = append(p.conns, in)
 	p.mu.Unlock()
