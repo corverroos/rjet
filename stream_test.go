@@ -373,6 +373,65 @@ func TestBrokenConns(t *testing.T) {
 	}
 }
 
+func TestStreamToHead(t *testing.T) {
+	ctx, js, ii, _ := setup(t)
+
+	// Ensure stream is created
+	s, err := rjet.NewStream(js, stream, rjet.WithDefaultStream(insubs))
+	ii.NoErr(err)
+
+	sc, err := s.Stream(ctx, "", reflex.WithStreamToHead())
+	jtest.RequireNil(t, err)
+
+	_, err = sc.Recv()
+	jtest.Require(t, reflex.ErrHeadReached, err)
+
+	const total = 10
+	for i := 0; i < total; i++ {
+		_, err := js.Publish(insub1, []byte(fmt.Sprint(i)))
+		ii.NoErr(err)
+	}
+
+	sc, err = s.Stream(ctx, "", reflex.WithStreamToHead())
+	jtest.RequireNil(t, err)
+
+	// This event should be skipped (inserted after call to stream)
+	_, err = js.Publish(insub2, []byte("skipped"))
+	ii.NoErr(err)
+
+	for i := 0; i < total; i++ {
+		_, err = sc.Recv()
+		ii.NoErr(err)
+	}
+	_, err = sc.Recv()
+	jtest.Require(t, reflex.ErrHeadReached, err)
+}
+
+func TestStreamToHeadWithFilter(t *testing.T) {
+	ctx, js, ii, _ := setup(t)
+
+	// Ensure stream is created
+	s, err := rjet.NewStream(js, stream, rjet.WithDefaultStream(insubs), rjet.WithSubjectFilter(insub2))
+	ii.NoErr(err)
+
+	// Insert 10 events in ignored subject.
+	const total = 10
+	for i := 0; i < total; i++ {
+		_, err := js.Publish(insub1, []byte(fmt.Sprint(i)))
+		ii.NoErr(err)
+	}
+
+	sc, err := s.Stream(ctx, "", reflex.WithStreamToHead())
+	jtest.RequireNil(t, err)
+
+	// This event should be the first, but it is after head
+	_, err = js.Publish(insub2, []byte("skipped"))
+	ii.NoErr(err)
+
+	_, err = sc.Recv()
+	jtest.Require(t, reflex.ErrHeadReached, err)
+}
+
 func TestSubjectFilter(t *testing.T) {
 	ctx, js, ii, _ := setup(t)
 

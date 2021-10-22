@@ -3,13 +3,16 @@ package rjet
 import (
 	"time"
 
+	"github.com/luno/reflex"
 	"github.com/nats-io/nats.go"
 )
 
 type o struct {
-	conf *nats.StreamConfig
-	opts []nats.JSOpt
-	subj string
+	conf            *nats.StreamConfig
+	opts            []nats.JSOpt
+	subj            string
+	foreignIDParser func(*nats.Msg) string
+	typeParser      func(*nats.Msg) reflex.EventType
 }
 
 type option func(*o)
@@ -43,5 +46,21 @@ func WithStream(conf *nats.StreamConfig, opts ...nats.JSOpt) option {
 func WithSubjectFilter(subj string) option {
 	return func(o *o) {
 		o.subj = subj
+	}
+}
+
+// WithForeignIDParser returns an option to specify a custom foreignID parser.
+// It overrides the default which uses the subject name.
+func WithForeignIDParser(fn func(*nats.Msg) string) option {
+	return func(o *o) {
+		o.foreignIDParser = fn
+	}
+}
+
+// WithTypeParser returns an option to specify a custom eventType parser.
+// It overrides the default which sets nil.
+func WithTypeParser(fn func(*nats.Msg) reflex.EventType) option {
+	return func(o *o) {
+		o.typeParser = fn
 	}
 }

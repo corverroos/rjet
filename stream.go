@@ -39,7 +39,7 @@ func NewStream(js nats.JetStreamContext, name string, opts ...option) (*Stream, 
 	return &Stream{
 		name: name,
 		js:   js,
-		subj: o.subj,
+		o:    o,
 	}, nil
 }
 
@@ -51,8 +51,8 @@ type Stream struct {
 	// js is the nats jetstream client.
 	js nats.JetStreamContext
 
-	// subj is the subscription filter.
-	subj string
+	// o is the stream options.
+	o o
 }
 
 // Stream implements reflex.StreamFunc and returns a StreamClient that
@@ -62,6 +62,10 @@ type Stream struct {
 //
 // Note that the stream sequence number after references must already exist.
 // If it hasn't been created yet, it is equivalent to StreamFromHead,
+//
+// Note that StreamToHead will block when used with WithSubjectFilter if
+// the stream contains messages but the filter doesn't. It will unblock and return
+// reflex.ErrHeadReached once a message matching the filter is received.
 func (s *Stream) Stream(ctx context.Context, after string,
 	opts ...reflex.StreamOption) (reflex.StreamClient, error) {
 
@@ -78,8 +82,19 @@ func (s *Stream) Stream(ctx context.Context, after string,
 
 	if sopts.Lag > 0 {
 		return nil, errors.New("lag option not supported")
-	} else if sopts.StreamToHead {
-		return nil, errors.New("stream to head option not supported")
+	}
+
+	var (
+		head   uint64
+		toHead bool
+	)
+	if sopts.StreamToHead {
+		info, err := s.js.StreamInfo(s.name)
+		if err != nil {
+			return nil, errors.Wrap(err, "stream info")
+		}
+		head = info.State.LastSeq
+		toHead = true
 	}
 
 	var startSeq uint64
@@ -89,34 +104,40 @@ func (s *Stream) Stream(ctx context.Context, after string,
 	} else if after == "" {
 		subopts = append(subopts, nats.DeliverAll())
 	} else if after != "" {
-		seq, err := strconv.ParseUint(after, 10, 64)
+		var err error
+		startSeq, err = strconv.ParseUint(after, 10, 64)
 		if err != nil {
 			return nil, errors.Wrap(err, "failed parsing redis stream entry id: "+after)
 		}
-		startSeq = seq + 1
-		subopts = append(subopts, nats.StartSequence(startSeq))
+		subopts = append(subopts, nats.StartSequence(startSeq+1))
 	}
 
 	// Since reflex manages its own cursors, we create an ephemeral consumers
-	sub, err := s.js.SubscribeSync(s.subj, subopts...)
+	sub, err := s.js.SubscribeSync(s.o.subj, subopts...)
 	if err != nil {
 		return nil, err
 	}
 
 	return &streamclient{
-		ctx:    ctx,
-		sub:    sub,
-		expect: startSeq,
-		first:  true,
+		ctx:        ctx,
+		sub:        sub,
+		typeParser: s.o.typeParser,
+		toHead:     toHead,
+		head:       head,
+		lastSSeq:   startSeq,
 	}, nil
 }
 
 type streamclient struct {
-	ctx context.Context
-	sub *nats.Subscription
+	ctx        context.Context
+	sub        *nats.Subscription
+	typeParser func(*nats.Msg) reflex.EventType
 
-	expect uint64
-	first  bool
+	toHead bool
+	head   uint64
+
+	lastSSeq uint64
+	lastCSeq uint64
 }
 
 func (s *streamclient) Close() error {
@@ -124,6 +145,11 @@ func (s *streamclient) Close() error {
 }
 
 func (s *streamclient) Recv() (*reflex.Event, error) {
+
+	if s.toHead && s.lastSSeq >= s.head {
+		return nil, reflex.ErrHeadReached
+	}
+
 start:
 	msg, err := s.sub.NextMsgWithContext(s.ctx)
 	if errors.Is(err, nats.ErrSlowConsumer) {
@@ -132,24 +158,28 @@ start:
 		return nil, errors.Wrap(err, "jetstream next")
 	}
 
-	e, sseq, cseq, err := parseEvent(msg)
+	e, sseq, cseq, err := parseEvent(msg, s.typeParser)
 	if err != nil {
 		return nil, err
 	}
 
-	if s.first {
-		if s.expect != 0 && s.expect != sseq {
-			return nil, errors.Wrap(ErrDroppedMsg, "unexpected start seq", j.MKV{"got": sseq, "expect": s.expect})
+	if s.toHead && sseq > s.head {
+		return nil, reflex.ErrHeadReached
+	}
+
+	if s.lastCSeq == 0 { // First message
+		if s.lastSSeq != 0 && s.lastSSeq+1 != sseq {
+			return nil, errors.Wrap(ErrDroppedMsg, "unexpected start stream seq", j.MKV{"got": sseq, "last": s.lastSSeq})
 		}
-		s.first = false
-	} else if s.expect < cseq {
-		return nil, errors.Wrap(ErrDroppedMsg, "unexpected consumer seq", j.MKV{"got": cseq, "expect": s.expect})
-	} else if s.expect > cseq {
+	} else if s.lastCSeq+1 < cseq {
+		return nil, errors.Wrap(ErrDroppedMsg, "unexpected consumer seq", j.MKV{"got": cseq, "last": s.lastCSeq})
+	} else if s.lastCSeq+1 > cseq {
 		// Duplicate message... lets swallow it
 		goto start
 	}
 
-	s.expect = cseq + 1
+	s.lastSSeq = sseq
+	s.lastCSeq = cseq
 
 	// TODO(corver): Is this still required given the above checks?
 	if d, err := s.sub.Dropped(); err != nil {
@@ -165,13 +195,12 @@ start:
 // Get metadata from reply subject: $JS.ACK.<stream>.<consumer>.<delivered count>.<stream sequence>.<consumer sequence>.<timestamp>.<pending messages>
 // See for reference: https://docs.nats.io/jetstream/nats_api_reference#acknowledging-messages
 // Also see: https://github.com/jgaskins/nats/blob/3ebac6a59ab1d0482c1ef5c42ee3c7e4f7fa7d58/src/jetstream.cr#L187-L206
-func parseEvent(msg *nats.Msg) (*reflex.Event, uint64, uint64, error) {
+func parseEvent(msg *nats.Msg, typeParser func(*nats.Msg) reflex.EventType) (*reflex.Event, uint64, uint64, error) {
 	split := strings.Split(msg.Reply, ".")
 	if len(split) != 9 {
 		return nil, 0, 0, errors.New("failed parsing msg metadata")
 	}
 
-	stream := split[2]
 	sseq := split[5]
 	cseq := split[6]
 	timestamp := split[7]
@@ -191,9 +220,15 @@ func parseEvent(msg *nats.Msg) (*reflex.Event, uint64, uint64, error) {
 		return nil, 0, 0, errors.Wrap(err, "failed parsing msg timestamp")
 	}
 
+	var typ reflex.EventType
+	if typeParser != nil {
+		typ = typeParser(msg)
+	}
+
 	return &reflex.Event{
 		ID:        sseq,
-		ForeignID: stream,
+		ForeignID: msg.Subject,
+		Type:      typ,
 		Timestamp: time.Unix(0, ts),
 		MetaData:  msg.Data,
 	}, sid, cid, nil
