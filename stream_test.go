@@ -113,6 +113,7 @@ func TestBasicStream(t *testing.T) {
 			e, err := sc.Recv()
 			jtest.RequireNil(t, err)
 			ii.Equal(string(e.MetaData), fmt.Sprint(i))
+			ii.Equal(e.Type.ReflexType(), 0)
 		}
 	}
 
@@ -202,6 +203,10 @@ func TestRobust(t *testing.T) {
 	ii.True(val1 < val2)
 }
 
+func Test(t *testing.T) {
+
+}
+
 var slow = flag.Bool("slow", false, "enable very slow tests")
 
 func TestSlowConsumer(t *testing.T) {
@@ -274,6 +279,39 @@ func TestSlowConsumer(t *testing.T) {
 				return
 			}
 		}
+	}
+}
+
+func TestEventType(t *testing.T) {
+	ctx, js, ii, _ := setup(t)
+
+	// Ensure stream is created
+	s, err := rjet.NewStream(js, stream, rjet.WithDefaultStream(insubs))
+	ii.NoErr(err)
+
+	t0 := time.Now()
+
+	const total = 10
+	for i := 0; i < total; i++ {
+		hdr := make(nats.Header)
+		hdr.Set(rjet.TypeHeader, fmt.Sprint(i))
+
+		_, err := js.PublishMsg(&nats.Msg{
+			Subject: insub1,
+			Header:  hdr,
+		})
+		ii.NoErr(err)
+	}
+
+	sc, err := s.Stream(ctx, "")
+	ii.NoErr(err)
+
+	for i := 0; i < total; i++ {
+		e, err := sc.Recv()
+		ii.NoErr(err)
+		ii.Equal(e.Type.ReflexType(), i)
+		ii.Equal(e.ForeignID, insub1)
+		ii.True(e.Timestamp.After(t0))
 	}
 }
 
@@ -476,9 +514,13 @@ func TestBench01(t *testing.T) {
 	ctx, js, ii, _ := setup(t)
 
 	const (
-		total   = 10000
 		payload = 64
 	)
+
+	total := 100
+	if *slow {
+		total = 10000
+	}
 
 	b := make([]byte, payload)
 	_, err := rand.Read(b)
@@ -496,7 +538,7 @@ func TestBench01(t *testing.T) {
 		}
 		<-js.PublishAsyncComplete()
 		delta := time.Since(t0)
-		fmt.Printf("Publish done after %s, %.1f msgs/sec\n", delta, total/delta.Seconds())
+		fmt.Printf("Publish done after %s, %.1f msgs/sec\n", delta, float64(total)/delta.Seconds())
 	}()
 
 	sc, err := s.Stream(ctx, "")
@@ -509,7 +551,7 @@ func TestBench01(t *testing.T) {
 
 	delta := time.Since(t0)
 
-	fmt.Printf("Duration=%dms, Total=%d, Payload=%d bytes, Throughput=%.0f msgs/sec\n", delta.Milliseconds(), total, payload, total/delta.Seconds())
+	fmt.Printf("Duration=%dms, Total=%d, Payload=%d bytes, Throughput=%.0f msgs/sec\n", delta.Milliseconds(), total, payload, float64(total)/delta.Seconds())
 }
 
 func startProxy(t testing.TB, ctx context.Context, target string) (*proxy, string) {
