@@ -132,6 +132,7 @@ func (s *Stream) Stream(ctx context.Context, after string,
 	return &streamclient{
 		ctx:      ctx,
 		sub:      sub,
+		filtered: s.o.subj != "",
 		toHead:   toHead,
 		head:     head,
 		lastSSeq: startSeq,
@@ -142,8 +143,9 @@ type streamclient struct {
 	ctx context.Context
 	sub *nats.Subscription
 
-	toHead bool
-	head   uint64
+	filtered bool
+	toHead   bool
+	head     uint64
 
 	lastSSeq uint64
 	lastCSeq uint64
@@ -177,7 +179,7 @@ start:
 	}
 
 	if s.lastCSeq == 0 { // First message
-		if s.lastSSeq != 0 && s.lastSSeq+1 != sseq {
+		if !s.filtered && s.lastSSeq != 0 && s.lastSSeq+1 != sseq {
 			return nil, errors.Wrap(ErrDroppedMsg, "unexpected start stream seq", j.MKV{"got": sseq, "last": s.lastSSeq})
 		}
 	} else if s.lastCSeq+1 < cseq {
