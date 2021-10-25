@@ -132,6 +132,7 @@ func (s *Stream) Stream(ctx context.Context, after string,
 	return &streamclient{
 		ctx:      ctx,
 		sub:      sub,
+		o:        s.o,
 		filtered: s.o.subj != "",
 		toHead:   toHead,
 		head:     head,
@@ -142,6 +143,7 @@ func (s *Stream) Stream(ctx context.Context, after string,
 type streamclient struct {
 	ctx context.Context
 	sub *nats.Subscription
+	o   o
 
 	filtered bool
 	toHead   bool
@@ -169,7 +171,7 @@ start:
 		return nil, errors.Wrap(err, "jetstream next")
 	}
 
-	e, sseq, cseq, err := parseEvent(msg)
+	e, sseq, cseq, err := parseEvent(msg, s.o.foreignIDParser)
 	if err != nil {
 		return nil, err
 	}
@@ -206,7 +208,7 @@ start:
 // Get metadata from reply subject: $JS.ACK.<stream>.<consumer>.<delivered count>.<stream sequence>.<consumer sequence>.<timestamp>.<pending messages>
 // See for reference: https://docs.nats.io/jetstream/nats_api_reference#acknowledging-messages
 // Also see: https://github.com/jgaskins/nats/blob/3ebac6a59ab1d0482c1ef5c42ee3c7e4f7fa7d58/src/jetstream.cr#L187-L206
-func parseEvent(msg *nats.Msg) (*reflex.Event, uint64, uint64, error) {
+func parseEvent(msg *nats.Msg, fParser func(*nats.Msg) string) (*reflex.Event, uint64, uint64, error) {
 	split := strings.Split(msg.Reply, ".")
 	if len(split) != 9 {
 		return nil, 0, 0, errors.New("failed parsing msg metadata")
@@ -240,9 +242,14 @@ func parseEvent(msg *nats.Msg) (*reflex.Event, uint64, uint64, error) {
 		typ = eventtype(i)
 	}
 
+	foriegnID := msg.Subject
+	if fParser != nil {
+		foriegnID = fParser(msg)
+	}
+
 	return &reflex.Event{
 		ID:        sseq,
-		ForeignID: msg.Subject,
+		ForeignID: foriegnID,
 		Type:      typ,
 		Timestamp: time.Unix(0, ts),
 		MetaData:  msg.Data,

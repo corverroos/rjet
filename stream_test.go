@@ -14,13 +14,14 @@ import (
 	"testing"
 	"time"
 
-	"github.com/corverroos/rjet"
 	"github.com/luno/fate"
 	"github.com/luno/jettison/jtest"
 	"github.com/luno/reflex"
 	"github.com/matryer/is"
 	"github.com/nats-io/nats.go"
 	"golang.org/x/sync/errgroup"
+
+	"github.com/corverroos/rjet"
 )
 
 const (
@@ -203,8 +204,30 @@ func TestRobust(t *testing.T) {
 	ii.True(val1 < val2)
 }
 
-func Test(t *testing.T) {
+func TestForeignIDParser(t *testing.T) {
+	ctx, js, ii, _ := setup(t)
 
+	const fid = "foo"
+	s, err := rjet.NewStream(js, stream, rjet.WithDefaultStream(insubs), rjet.WithForeignIDParser(func(msg *nats.Msg) string {
+		return fid
+	}))
+	jtest.RequireNil(t, err)
+
+	_, err = js.Publish(insub1, nil)
+	jtest.RequireNil(t, err)
+	_, err = js.Publish(insub2, nil)
+	jtest.RequireNil(t, err)
+
+	sc, err := s.Stream(ctx, "")
+	jtest.RequireNil(t, err)
+
+	e, err := sc.Recv()
+	jtest.RequireNil(t, err)
+	ii.Equal(e.ForeignID, fid)
+
+	e, err = sc.Recv()
+	jtest.RequireNil(t, err)
+	ii.Equal(e.ForeignID, fid)
 }
 
 var slow = flag.Bool("slow", false, "enable very slow tests")
