@@ -2,6 +2,7 @@ package rjet
 
 import (
 	"context"
+	"io"
 	"strconv"
 	"strings"
 	"time"
@@ -67,16 +68,18 @@ type Stream struct {
 }
 
 // Stream implements reflex.StreamFunc and returns a StreamClient that
-// streams events from the redis stream after the provided cursor (redis stream ID).
+// streams events from the nats stream after the provided sequence.
 // Stream is safe to call from multiple goroutines, but the returned
 // StreamClient is only safe for a single goroutine to use.
 //
 // Note that the stream sequence number after references must already exist.
 // If it hasn't been created yet, it is equivalent to StreamFromHead,
 //
-// Note that StreamToHead will block when used with WithSubjectFilter if
-// the stream contains messages but the filter doesn't. It will unblock and return
-// reflex.ErrHeadReached once a message matching the filter is received.
+// Note this is a slow operation (tens of milliseconds) since it creates an ephemeral consumer
+// of the nats stream.
+//
+// The returns reflex.StreamClient implementation is also an io.Closer. It is advised
+// to close the stream after use, since it seems to improve performance.
 func (s *Stream) Stream(ctx context.Context, after string,
 	opts ...reflex.StreamOption) (reflex.StreamClient, error) {
 
@@ -142,6 +145,16 @@ func (s *Stream) Stream(ctx context.Context, after string,
 		head:     head,
 		lastSSeq: startSeq,
 	}, nil
+}
+
+// MaybeClose closes the stream client if it implements io.Closer, like *streamclient does.
+func MaybeClose(cl reflex.StreamClient) error {
+	closer, ok := cl.(io.Closer)
+	if !ok {
+		return nil
+	}
+
+	return closer.Close()
 }
 
 type streamclient struct {

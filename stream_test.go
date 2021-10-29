@@ -564,6 +564,32 @@ func TestBench01(t *testing.T) {
 	fmt.Printf("Duration=%dms, Total=%d, Payload=%d bytes, Throughput=%.0f msgs/sec\n", delta.Milliseconds(), total, payload, float64(total)/delta.Seconds())
 }
 
+func TestStreamBench(t *testing.T) {
+	ctx, js, ii, _ := setup(t)
+
+	s, err := rjet.NewStream(js, stream, rjet.WithDefaultStream(insub1))
+	ii.NoErr(err)
+
+	_, err = js.Publish(insub1, nil)
+	ii.NoErr(err)
+
+	const total = 50
+	t0 := time.Now()
+
+	for i := 0; i < total; i++ {
+		sc, err := s.Stream(ctx, "")
+		ii.NoErr(err)
+
+		_, err = sc.Recv()
+		ii.NoErr(err)
+
+		ii.NoErr(rjet.MaybeClose(sc))
+	}
+
+	delta := time.Since(t0)
+	fmt.Printf("Total=%d, Duration=%dms, Avg Duration=%dms\n", total, delta.Milliseconds(), delta.Milliseconds()/total)
+}
+
 func startProxy(t testing.TB, ctx context.Context, target string) (*proxy, string) {
 	l, err := (&net.ListenConfig{}).Listen(ctx, "tcp", "localhost:0")
 	if err != nil {
