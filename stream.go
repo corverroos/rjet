@@ -100,6 +100,10 @@ func (s *Stream) Stream(ctx context.Context, after string,
 		toHead bool
 	)
 	if sopts.StreamToHead {
+		if s.o.subj != "" {
+			return nil, errors.New("stream to head with subject filter not supported")
+		}
+
 		info, err := s.js.StreamInfo(s.name)
 		if err != nil {
 			return nil, errors.Wrap(err, "stream info")

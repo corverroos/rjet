@@ -19,6 +19,7 @@ import (
 	"github.com/luno/reflex"
 	"github.com/matryer/is"
 	"github.com/nats-io/nats.go"
+	"github.com/stretchr/testify/require"
 	"golang.org/x/sync/errgroup"
 
 	"github.com/corverroos/rjet"
@@ -475,22 +476,8 @@ func TestStreamToHeadWithFilter(t *testing.T) {
 	s, err := rjet.NewStream(js, stream, rjet.WithDefaultStream(insubs), rjet.WithSubjectFilter(insub2))
 	ii.NoErr(err)
 
-	// Insert 10 events in ignored subject.
-	const total = 10
-	for i := 0; i < total; i++ {
-		_, err := js.Publish(insub1, []byte(fmt.Sprint(i)))
-		ii.NoErr(err)
-	}
-
-	sc, err := s.Stream(ctx, "", reflex.WithStreamToHead())
-	jtest.RequireNil(t, err)
-
-	// This event should be the first, but it is after head
-	_, err = js.Publish(insub2, []byte("skipped"))
-	ii.NoErr(err)
-
-	_, err = sc.Recv()
-	jtest.Require(t, reflex.ErrHeadReached, err)
+	_, err = s.Stream(ctx, "", reflex.WithStreamToHead())
+	require.Error(t, err)
 }
 
 func TestSubjectFilter(t *testing.T) {
